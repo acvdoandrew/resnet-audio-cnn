@@ -27,7 +27,7 @@ An end-to-end **environmental sound classification system** powered by a custom 
 ---
 
 ## 🛠️ Tech Stack
-- **Languages**: Python, JavaScript (Next.js dashboard in progress)  
+- **Languages**: Python, TypeScript(Next.js dashboard in progress)  
 - **ML/DL Frameworks**: PyTorch, torchaudio  
 - **Backend**: FastAPI, Pydantic  
 - **Environment Management**: uv  
