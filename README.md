@@ -12,21 +12,18 @@ An end-to-end **environmental sound classification system** powered by a custom 
 - **FastAPI backend** with Pydantic validation  
 - **uv-based project setup** for fast dependency management and reproducible environments  
 
----
-
 ## 📂 Project Structure
-
+```
 .
 ├── .gitignore
 ├── .python-version
 ├── README.md
-├── main.py # FastAPI entry point for inference
-├── model.py # Model architecture and loading utilities
-├── pyproject.toml # uv project configuration
-├── train.py # Training loop and data pipeline
-└── uv.lock # uv dependency lock file
-
-
+├── main.py          # FastAPI entry point for inference
+├── model.py         # Model architecture and loading utilities
+├── pyproject.toml   # uv project configuration
+├── train.py         # Training loop and data pipeline
+└── uv.lock          # uv dependency lock file
+```
 ---
 
 ## 🛠️ Tech Stack
