@@ -10,23 +10,30 @@ import numpy as np
 import torchaudio
 import torchaudio.transforms as T
 from model import AudioCNN
-import tqdm
+from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 app = modal.App("Audio-CNN")
 
-image = (modal.Image.debian_slim()
-         .uv_sync()
-         .apt_install(["wget", "unzip", "ffmpeg", "libsndfile1"])
-         .run_commands(["cd /tmp && wget https://github.com/karolpiczak/ESC-50/archive/master.zip -O esc50.zip",
-                        "cd /tmp && unzip esc50.zip",
-                        "mkdir -p /opt/esc50-data",
-                        "cp -r /tmp/ESC-50-master/* /opt/esc50-data/",
-                        "rm -rf /tmp/esc50.zip /tmp/ESC-50-master"
-                        ])
-         .add_local_python_source("model"))
+image = (
+    modal.Image.debian_slim()
+    .uv_sync()
+    .apt_install(["wget", "unzip", "ffmpeg", "libsndfile1"])
+    .run_commands(
+        [
+            "cd /tmp && wget https://github.com/karolpiczak/ESC-50/archive/master.zip -O esc50.zip",
+            "cd /tmp && unzip esc50.zip",
+            "mkdir -p /opt/esc50-data",
+            "cp -r /tmp/ESC-50-master/* /opt/esc50-data/",
+            "rm -rf /tmp/esc50.zip /tmp/ESC-50-master",
+        ]
+    )
+    .add_local_python_source("model")
+)
 
 volume = modal.Volume.from_name("esc50-data", create_if_missing=True)
 model_volume = modal.Volume.from_name("esc-model", create_if_missing=True)
+
 
 class ESC50Dataset(Dataset):
     def __init__(self, data_dir, metadata_file, split="train", transform=None):
@@ -64,6 +71,7 @@ class ESC50Dataset(Dataset):
 
         return spectrogram, row["label"]
 
+
 def mixup_data(x, y):
     lam = np.random.beta(0.2, 0.2)
 
@@ -75,11 +83,24 @@ def mixup_data(x, y):
     y_a, y_b = y, y[index]
     return mixed_x, y_a, y_b, lam
 
+
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
-@app.function(image=image, gpu="A10G", volumes={"/data": volume, "/models": model_volume}, timeout=60 * 60 * 3)
+
+@app.function(
+    image=image,
+    gpu="A10G",
+    volumes={"/data": volume, "/models": model_volume},
+    timeout=60 * 60 * 3,
+)
 def train():
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = f"/models/tensorboard_logs/run_{timestamp}"
+    writer = SummaryWriter(log_dir)
+
     esc50_dir = Path("/opt/esc50-data")
 
     train_transform = nn.Sequential(
@@ -89,11 +110,11 @@ def train():
             hop_length=512,
             n_mels=128,
             f_min=0,
-            f_max=11025
+            f_max=11025,
         ),
         T.AmplitudeToDB(),
         T.FrequencyMasking(freq_mask_param=30),
-        T.TimeMasking(time_mask_param=80)
+        T.TimeMasking(time_mask_param=80),
     )
 
     val_transform = nn.Sequential(
@@ -103,13 +124,23 @@ def train():
             hop_length=512,
             n_mels=128,
             f_min=0,
-            f_max=11025
+            f_max=11025,
         ),
-        T.AmplitudeToDB()
+        T.AmplitudeToDB(),
     )
 
-    train_dataset = ESC50Dataset(data_dir=esc50_dir, metadata_file=esc50_dir / "meta" / "esc50.csv", split="train", transform=train_transform)
-    val_dataset = ESC50Dataset(data_dir=esc50_dir, metadata_file=esc50_dir / "meta" / "esc50.csv", split="val", transform=val_transform)
+    train_dataset = ESC50Dataset(
+        data_dir=esc50_dir,
+        metadata_file=esc50_dir / "meta" / "esc50.csv",
+        split="train",
+        transform=train_transform,
+    )
+    val_dataset = ESC50Dataset(
+        data_dir=esc50_dir,
+        metadata_file=esc50_dir / "meta" / "esc50.csv",
+        split="test",
+        transform=val_transform,
+    )
 
     print(f"Training Samples: {len(train_dataset)}")
     print(f"Val Samples:  {len(val_dataset)}")
@@ -130,7 +161,7 @@ def train():
         max_lr=0.002,
         epochs=num_epochs,
         steps_per_epoch=len(train_dataloader),
-        pct_start=0.1
+        pct_start=0.1,
     )
 
     best_accuracy = 0.0
@@ -140,7 +171,7 @@ def train():
         model.train()
         epoch_loss = 0.0
 
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
         for data, target in progress_bar:
             data, target = data.to(device), target.to(device)
 
@@ -161,11 +192,13 @@ def train():
             progress_bar.set_postfix({"Loss": f"{loss.item():.4f}"})
 
         avg_epoch_loss = epoch_loss / len(train_dataloader)
+        writer.add_scalar("Loss/Train", avg_epoch_loss, epoch)
+        writer.add_scalar("Learning_Rate", optimizer.param_groups[0]["lr"], epoch)
 
         # Validation after each epoch
         model.eval()
 
-        correct = 0 
+        correct = 0
         total = 0
         val_loss = 0
 
@@ -173,32 +206,40 @@ def train():
             for data, target in test_dataloader:
                 data, target = data.to(device), target.to(device)
                 outputs = model(data)
-                loss = criterion(data)
+                loss = criterion(outputs, target)
                 val_loss += loss.item()
 
                 _, predicted = torch.max(outputs.data, 1)
                 total += target.size(0)
                 correct += (predicted == target).sum().item()
 
-        accuracy = 100 * correct / total 
+        accuracy = 100 * correct / total
         avg_val_loss = val_loss / len(test_dataloader)
 
-        print(f"Epoch: {epoch+1} Loss: {avg_epoch_loss:.4f}, Val Loss: {avg_val_loss}, Accuracy: {accuracy:.2f}%")
+        writer.add_scalar("Loss/Validation", avg_val_loss, epoch)
+        writer.add_scalar("Accuracy/Validation", accuracy, epoch)
+
+        print(
+            f"Epoch: {epoch + 1} Loss: {avg_epoch_loss:.4f}, Val Loss: {avg_val_loss}, Accuracy: {accuracy:.2f}%"
+        )
 
         if accuracy > best_accuracy:
             best_accuracy = accuracy
-            torch.save({
-                "model_state_dict": model.state_dict(),
-                "accuracy": accuracy,
-                "epoch": epoch,
-                "classes": train_dataset.classes
-            }, "/models/best_model.pth")
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "accuracy": accuracy,
+                    "epoch": epoch,
+                    "classes": train_dataset.classes,
+                },
+                "/models/best_model.pth",
+            )
             print(f"New best model saved: {accuracy:.2f}%")
 
+    writer.close()
     print(f"Training Completed! Best Accuracy:  {best_accuracy:.2f}%")
 
 
 @app.local_entrypoint()
 def main():
     train.remote()
-
